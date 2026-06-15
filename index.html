@@ -1332,6 +1332,9 @@ async function saveData(){
   await storageSetValue(STORAGE_KEY, JSON.stringify(readings));
 }
 
+// Fixed color per meter — matches chart datasets exactly. Never changes.
+const METER_COLORS = ['#4fa8a0', '#e8a33d', '#c0654a'];
+
 function thresholdColor(val){
   if (val === null || val === undefined) return 'var(--ok)';
   if (val >= THRESHOLD) return 'var(--danger)';
@@ -1389,19 +1392,18 @@ function renderPeriodGrid(derived, daily){
 
   grid.innerHTML = periods.map(p => {
     const rows = [
-      {label:'Meter 1', val: p.avgs.r1},
-      {label:'Meter 2', val: p.avgs.r2},
-      {label:'Meter 3', val: p.avgs.r3},
+      {label:'Meter 1', val: p.avgs.r1, color: METER_COLORS[0]},
+      {label:'Meter 2', val: p.avgs.r2, color: METER_COLORS[1]},
+      {label:'Meter 3', val: p.avgs.r3, color: METER_COLORS[2]},
     ].map(m => {
-      const color = thresholdColor(m.val);
       const pct = m.val !== null ? Math.min(100, (m.val / THRESHOLD) * 100) : 0;
       return `
         <div class="period-row">
           <div class="period-row-head">
-            <span class="period-meter-name">${m.label}</span>
-            <span class="period-meter-value" style="color:${color}">${m.val !== null ? fmt(m.val) : '—'}</span>
+            <span class="period-meter-name" style="color:${m.color}">${m.label}</span>
+            <span class="period-meter-value" style="color:${m.color}">${m.val !== null ? fmt(m.val) : '—'}</span>
           </div>
-          <div class="period-bar-track"><div class="period-bar-fill" style="width:${pct}%; background:${color}"></div></div>
+          <div class="period-bar-track"><div class="period-bar-fill" style="width:${pct}%; background:${m.color}"></div></div>
         </div>`;
     }).join('');
     return `
@@ -1420,19 +1422,18 @@ function renderMiniGauges(derived){
   label.textContent = last ? `Latest Daily Use — ${last.date}` : 'Latest Daily Use';
 
   const meters = [
-    {label:'Meter 1', val: last ? last.r1 : null},
-    {label:'Meter 2', val: last ? last.r2 : null},
-    {label:'Meter 3', val: last ? last.r3 : null},
+    {label:'Meter 1', val: last ? last.r1 : null, color: METER_COLORS[0]},
+    {label:'Meter 2', val: last ? last.r2 : null, color: METER_COLORS[1]},
+    {label:'Meter 3', val: last ? last.r3 : null, color: METER_COLORS[2]},
   ];
   cluster.innerHTML = meters.map(m => {
     const val = m.val;
-    const color = thresholdColor(val);
     const pct = val !== null ? Math.min(100, (val / THRESHOLD) * 100) : 0;
     return `
-      <div class="mini-gauge-card">
-        <div class="mini-gauge-label">${m.label}</div>
-        <div class="mini-gauge-value" style="color:${color}">${val !== null ? fmt(val) : '—'} <span class="mini-gauge-unit">gal/day</span></div>
-        <div class="mini-gauge-bar-track"><div class="mini-gauge-bar-fill" style="width:${pct}%; background:${color}"></div></div>
+      <div class="mini-gauge-card" style="border-top: 3px solid ${m.color};">
+        <div class="mini-gauge-label" style="color:${m.color}">${m.label}</div>
+        <div class="mini-gauge-value" style="color:${m.color}">${val !== null ? fmt(val) : '—'} <span class="mini-gauge-unit">gal/day</span></div>
+        <div class="mini-gauge-bar-track"><div class="mini-gauge-bar-fill" style="width:${pct}%; background:${m.color}"></div></div>
       </div>`;
   }).join('');
 }
