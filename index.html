@@ -213,6 +213,23 @@ thead th:first-child, tbody td:first-child{ text-align: left; }
 tbody td{ padding: 8px 10px; text-align: right; border-bottom: 1px solid var(--line); white-space: nowrap; }
 tbody tr:hover{ background: rgba(255,255,255,0.02); }
 .over{ color: var(--rust); font-weight: 700; }
+.flag{
+  display: inline-block; margin-left: 6px; padding: 1px 5px;
+  font-family: var(--mono); font-size: 10px; font-weight: 700;
+  letter-spacing: .03em; text-transform: uppercase; white-space: nowrap;
+  border: 1px solid currentColor; border-radius: 3px; vertical-align: middle;
+}
+.flag-roll{ color: var(--teal); }
+.flag-bad{ color: var(--danger); }
+.flag-spike{ color: var(--amber); }
+.flag-dup{ color: var(--muted); }
+.reading-bad{ color: var(--danger); text-decoration: line-through; }
+tr.row-flagged td{ background: rgba(232,163,61,.05); }
+tr.flag-note-row td{
+  background: rgba(232,163,61,.05);
+  color: var(--muted); font-size: 11px; line-height: 1.5;
+  padding-top: 0; border-top: none; white-space: normal;
+}
 .del-btn{
   background: transparent; color: var(--muted); border: 1px solid var(--line);
   border-radius: 4px; padding: 3px 8px; font-family: var(--mono); font-size: 11px;
@@ -332,7 +349,7 @@ tbody tr:hover{ background: rgba(255,255,255,0.02); }
       </table>
     </div>
     <div class="footer-note" id="storageNote">
-      Daily rates = (reading − previous reading) ÷ (days since previous reading). First entry has no prior reading, so no rate is shown. Red = at or over the 8,000 gal/day threshold.
+      Daily rates = (reading − previous reading) ÷ (days since previous reading). First entry has no prior reading, so no rate is shown. Red = at or over the 8,000 gal/day threshold. ↻ Rollover = meter wrapped past its max and restarted at 0; usage is corrected automatically. ⚠ Check = reading went backward (likely a typo); it's excluded and the next reading is measured from the last good one. ▲ Spike = more than 2.5× that meter's recent median. ⧉ Duplicate = identical to the previous entry.
     </div>
   </div>
 
@@ -1224,25 +1241,101 @@ function dayDiff(d1, d2){
   return Math.round((a - b) / 86400000);
 }
 
+// Register size for rollover: a meter reading 99,974,900 has an 8-digit
+// register, so it wraps to 0 after 99,999,999 (wrap = 100,000,000).
+function registerWrap(value){
+  return Math.pow(10, String(Math.floor(Math.abs(value))).length);
+}
+
+// Rollover = previous reading was near the top of its register and the new
+// reading is near the bottom. Anything else that goes backward is a bad entry.
+function isRollover(cur, prev){
+  const wrap = registerWrap(prev);
+  return prev >= wrap * 0.9 && cur < wrap * 0.1;
+}
+
+function median(vals){
+  if (!vals.length) return null;
+  const s = [...vals].sort((a,b) => a - b);
+  const m = Math.floor(s.length / 2);
+  return s.length % 2 ? s[m] : (s[m-1] + s[m]) / 2;
+}
+
+const SPIKE_MULT = 2.5;      // rate > 2.5x the meter's recent median = spike
+const SPIKE_LOOKBACK = 10;   // recent valid rates used for that median
+
 function computeDerived(rows){
   // rows: array of {date, chlorine, m1, m2, m3}, sorted by date asc
+  //
+  // Each meter keeps its own "last good" baseline. A reading that goes
+  // backward (and isn't a rollover) is flagged and skipped as a baseline, so
+  // the next good reading is measured against the last trusted one instead of
+  // the typo. That keeps one bad entry from producing two bad rates.
+  const keys = ['m1','m2','m3'];
+  const base = { m1: null, m2: null, m3: null };      // {date, value}
+  const history = { m1: [], m2: [], m3: [] };         // recent valid rates
+
   return rows.map((r, i) => {
-    if (i === 0) return {...r, days: null, r1: null, r2: null, r3: null};
-    const prev = rows[i-1];
-    const days = dayDiff(r.date, prev.date);
-    const safeDiv = (a,b) => {
-      if (days <= 0) return null;
-      // Meter not yet installed (reads 0) - no baseline to diff against
-      if (a === 0 || b === 0) return null;
-      return (a - b) / days;
-    };
-    return {
-      ...r,
-      days,
-      r1: safeDiv(r.m1, prev.m1),
-      r2: safeDiv(r.m2, prev.m2),
-      r3: safeDiv(r.m3, prev.m3),
-    };
+    const prevRow = i > 0 ? rows[i-1] : null;
+    const days = prevRow ? dayDiff(r.date, prevRow.date) : null;
+    const out = { ...r, days };
+
+    // Duplicate entry: every meter identical to the previous row.
+    const duplicate = !!prevRow && keys.every(k => r[k] === prevRow[k] && r[k] !== 0);
+
+    keys.forEach((k, idx) => {
+      const n = idx + 1;
+      const cur = r[k];
+      let rate = null, flag = null, note = null, since = null;
+
+      if (cur === 0 || cur === null || cur === undefined || isNaN(cur)){
+        // Meter not installed / no reading — no rate, baseline untouched
+      } else if (!base[k]){
+        base[k] = { date: r.date, value: cur };   // first reading, no prior
+      } else {
+        const span = dayDiff(r.date, base[k].date);
+        const prev = base[k].value;
+        if (span <= 0){
+          flag = 'bad'; note = 'Date is not after the previous reading';
+        } else if (cur >= prev){
+          rate = (cur - prev) / span;
+          since = base[k].date;
+          if (duplicate){
+            flag = 'dup'; note = 'Same readings as the previous entry — likely entered twice';
+          }
+          base[k] = { date: r.date, value: cur };
+        } else if (isRollover(cur, prev)){
+          const wrap = registerWrap(prev);
+          rate = (wrap - prev + cur) / span;
+          since = base[k].date;
+          flag = 'roll';
+          note = `Meter rolled over at ${fmt(wrap)} — used ${fmt(wrap - prev + cur)} gal`;
+          base[k] = { date: r.date, value: cur };
+        } else {
+          // Went backward: bad entry. Don't use it as the next baseline.
+          flag = 'bad';
+          note = `Reading is ${fmt(prev - cur)} lower than ${base[k].date} (${fmt(prev)}) — likely a typo. Excluded from rates.`;
+        }
+      }
+
+      // Spike: valid rate far above this meter's recent median. Kept in the
+      // numbers (could be a real leak or fill) but highlighted for review.
+      if (rate !== null){
+        const med = median(history[k].slice(-SPIKE_LOOKBACK));
+        if (!flag && med && history[k].length >= 3 && rate > med * SPIKE_MULT){
+          flag = 'spike';
+          note = `${(rate / med).toFixed(1)}× this meter's recent median (${fmt(med)}/day) — check for a leak, fill, or entry error`;
+        }
+        if (flag !== 'dup') history[k].push(rate);
+      }
+
+      out['r' + n] = rate;
+      out['f' + n] = flag;
+      out['n' + n] = note;
+      out['s' + n] = since;   // date the rate is measured from
+    });
+
+    return out;
   });
 }
 
@@ -1450,24 +1543,34 @@ function renderTable(derived){
   // show newest first
   const rows = [...derived].slice().reverse();
   tbody.innerHTML = rows.map(r => {
-    const cellRate = (v) => {
-      if (v === null || v === undefined) return '—';
+    const esc = (s) => String(s).replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;');
+    const FLAG_BADGE = { roll: '↻ rollover', bad: '⚠ check', spike: '▲ spike', dup: '⧉ duplicate' };
+    const cellRate = (n) => {
+      const v = r['r' + n], flag = r['f' + n], note = r['n' + n];
+      const badge = flag ? `<span class="flag flag-${flag}" title="${esc(note || '')}">${FLAG_BADGE[flag]}</span>` : '';
+      if (v === null || v === undefined) return badge || '—';
       const cls = v >= THRESHOLD ? 'over' : '';
-      return `<span class="${cls}">${fmt(v)}</span>`;
+      return `<span class="${cls}">${fmt(v)}</span>${badge}`;
     };
+    const cellReading = (n) => {
+      const flag = r['f' + n];
+      return flag === 'bad' ? `<span class="reading-bad">${fmt(r['m' + n])}</span>` : fmt(r['m' + n]);
+    };
+    const notes = [1,2,3].filter(n => r['f' + n]).map(n => `M${n}: ${r['n' + n]}`);
     return `
-      <tr>
+      <tr${notes.length ? ` class="row-flagged" title="${esc(notes.join('\n'))}"` : ''}>
         <td>${r.date}</td>
         <td>${fmt(r.chlorine, 2)}</td>
-        <td>${fmt(r.m1)}</td>
-        <td>${fmt(r.m2)}</td>
-        <td>${fmt(r.m3)}</td>
+        <td>${cellReading(1)}</td>
+        <td>${cellReading(2)}</td>
+        <td>${cellReading(3)}</td>
         <td>${r.days !== null ? r.days : '—'}</td>
-        <td>${cellRate(r.r1)}</td>
-        <td>${cellRate(r.r2)}</td>
-        <td>${cellRate(r.r3)}</td>
+        <td>${cellRate(1)}</td>
+        <td>${cellRate(2)}</td>
+        <td>${cellRate(3)}</td>
         <td><button class="del-btn" data-date="${r.date}">Remove</button></td>
-      </tr>`;
+      </tr>${notes.length ? `
+      <tr class="flag-note-row"><td colspan="10">${notes.map(t => `<div>${esc(t)}</div>`).join('')}</td></tr>` : ''}`;
   }).join('');
 
   tbody.querySelectorAll('.del-btn').forEach(btn => {
@@ -1505,29 +1608,38 @@ function renderTable(derived){
 // Expand reading-to-reading rates into one entry per calendar day, so a gap
 // between readings (e.g. a 5-day stretch) shows as a flat average across
 // those days rather than one spike on the day it was read.
+// Each meter's rate covers the days from its own baseline (s1/s2/s3) to the
+// reading date, so a span that skipped a bad entry still fills every day.
 function buildDailySeries(derived){
   if (derived.length < 2) return [];
-  const gaps = derived.slice(1); // each gap ends on r.date and covers r.days days
-  const daily = [];
-  let gapIdx = 0;
-  let cur = new Date(derived[0].date + 'T00:00:00');
+  const isoDay = (d) => {
+    const y = d.getFullYear(), m = String(d.getMonth()+1).padStart(2,'0'), dd = String(d.getDate()).padStart(2,'0');
+    return `${y}-${m}-${dd}`;
+  };
+  const map = new Map();
+  const cur = new Date(derived[0].date + 'T00:00:00');
   const end = new Date(derived[derived.length - 1].date + 'T00:00:00');
   cur.setDate(cur.getDate() + 1); // first day after the initial reading
-
   while (cur <= end){
-    const dateStr = cur.toISOString().slice(0,10);
-    while (gapIdx < gaps.length - 1 && new Date(gaps[gapIdx].date + 'T00:00:00') < cur){
-      gapIdx++;
-    }
-    const gap = gaps[gapIdx];
-    let r1 = null, r2 = null, r3 = null;
-    if (gap && cur <= new Date(gap.date + 'T00:00:00')){
-      r1 = gap.r1; r2 = gap.r2; r3 = gap.r3;
-    }
-    daily.push({ date: dateStr, r1, r2, r3 });
+    const ds = isoDay(cur);
+    map.set(ds, { date: ds, r1: null, r2: null, r3: null });
     cur.setDate(cur.getDate() + 1);
   }
-  return daily;
+  derived.forEach(r => {
+    [1,2,3].forEach(n => {
+      const rate = r['r' + n], since = r['s' + n];
+      if (rate === null || rate === undefined || !since) return;
+      const d = new Date(since + 'T00:00:00');
+      d.setDate(d.getDate() + 1);
+      const stop = new Date(r.date + 'T00:00:00');
+      while (d <= stop){
+        const entry = map.get(isoDay(d));
+        if (entry) entry['r' + n] = rate;
+        d.setDate(d.getDate() + 1);
+      }
+    });
+  });
+  return [...map.values()];
 }
 
 function filterDaily(daily, derived){
